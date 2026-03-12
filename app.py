@@ -1,6 +1,7 @@
 from flask import Flask, render_template_string
 import requests
 import json
+import os
 
 app = Flask(__name__)
 
@@ -79,5 +80,7 @@ def index():
     return render_template_string(html_template, temp=temp_value, error=error_msg)
 
 if __name__ == '__main__':
-    # 绑定 0.0.0.0 适应服务器环境，端口设置 8080
-    app.run(host='0.0.0.0', port=8080)
+    # 获取 Zeabur 动态分配的端口，如果没有（比如本地运行），则默认使用 8080
+    port = int(os.getenv("PORT", 8080))
+    # 启动服务
+    app.run(host='0.0.0.0', port=port)
