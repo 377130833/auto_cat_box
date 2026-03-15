@@ -12,68 +12,89 @@ AUTHORIZATION = "version=2018-10-31&res=products%2FzJsLok5Lw5%2Fdevices%2Ftest&e
 
 @app.route('/')
 def index():
-    # 我们现在需要请求两个不同的 API
     status_url = f"https://iot-api.heclouds.com/device/detail?product_id={PRODUCT_ID}&device_name={DEVICE_NAME}"
     prop_url = f"https://iot-api.heclouds.com/thingmodel/query-device-property?product_id={PRODUCT_ID}&device_name={DEVICE_NAME}"
-    
+
     headers = {
         "authorization": AUTHORIZATION
     }
-    
+
     # 定义默认值
     temp_value = "--"
     sys_state_text = "获取中..."
     sys_state_color = "#cbd5e0" # 默认灰色
-    error_msg = ""
+
+    cat_text = "获取中..."
+    cat_color = "#cbd5e0"
+
+    api_error = ""
+    hw_error = ""
     is_online = False
-    
+
     try:
         # ================= 2.1 核心修复：先获取设备的物理在线状态 =================
         status_res = requests.get(status_url, headers=headers, timeout=5).json()
         if status_res.get("code") == 0:
-            # OneNet 返回的 status 字段：1 代表在线，2 代表离线
             dev_status = status_res.get("data", {}).get("status")
             if dev_status == 1:
                 is_online = True
-                sys_state_text = "等待设备上报..." # 在线，但 STM32 还没发数据时的默认提示
-                sys_state_color = "#ecc94b" # 橙黄色警告
+                sys_state_text = "等待设备上报..."
+                sys_state_color = "#ecc94b"
             else:
                 is_online = False
                 sys_state_text = "离线 (设备断网)"
-                sys_state_color = "#a0aec0" # 灰色
-        
-        # ================= 2.2 获取设备物模型属性 (温度等数据) =================
+                sys_state_color = "#a0aec0"
+
+                # 设备离线时，强制覆盖其他状态
+                cat_text = "未知 (离线)"
+                cat_color = "#a0aec0"
+
+        # ================= 2.2 获取设备物模型属性 (温度、状态、错误码等) =================
         prop_res = requests.get(prop_url, headers=headers, timeout=5).json()
         if prop_res.get("code") == 0:
             properties = prop_res.get("data", [])
             for prop in properties:
                 identifier = prop.get("identifier")
                 val = prop.get("value")
-                
-                # 读取温度 (无论离线在线，都可以显示最后一次的缓存温度)
+
+                # 1. 解析温度
                 if identifier == "temp" and val is not None:
                     try:
-                        temp_value = f"{float(val):.1f}"
+                        temp_value = f"{float(val):.2f}"
                     except ValueError:
                         temp_value = str(val)
-                        
-                # 只有在设备【在线】时，我们才去解析它上报的系统状态
+
+                # 2. 解析系统运行状态 (仅在线时处理)
                 elif identifier == "system_run_state" and val is not None and is_online:
-                    # 兼容 true/1/"true" 各种格式
                     if val is True or str(val).lower() == 'true' or str(val) == '1':
                         sys_state_text = "正常 (运行中)"
-                        sys_state_color = "#48bb78"
+                        sys_state_color = "#48bb78" # 绿色
                     else:
-                        sys_state_text = "异常 (运行超时)"
-                        sys_state_color = "#e53e3e"
+                        sys_state_text = "异常 (运行停止)"
+                        sys_state_color = "#e53e3e" # 红色
+
+                # 3. 解析猫咪状态 (仅在线时处理)
+                elif identifier == "cat_status" and val is not None and is_online:
+                    if str(val) == "1":
+                        cat_text = "检测到猫咪 (防夹保护中)"
+                        cat_color = "#ed8936" # 橙色警告
+                    else:
+                        cat_text = "安全 (无猫咪)"
+                        cat_color = "#48bb78" # 绿色安全
+
+                # 4. 解析错误码报警
+                elif identifier == "error_code" and val is not None and is_online:
+                    if str(val) != "0":
+                        hw_error = f"系统发生异常: {val}"
+
         else:
-            if not error_msg: 
-                error_msg = f"属性获取失败: {prop_res.get('msg')}"
+            if not api_error:
+                api_error = f"属性获取失败: {prop_res.get('msg')}"
 
     except Exception as e:
-        error_msg = f"网络请求异常: {str(e)}"
+        api_error = f"网络请求异常: {str(e)}"
 
-    # ================= 3. 现代化前端 HTML 模板 (与之前完全相同) =================
+    # ================= 3. 现代化前端 HTML 模板 =================
     html_template = """
     <!DOCTYPE html>
     <html lang="zh-CN">
@@ -85,7 +106,7 @@ def index():
             :root {
                 --bg-color: #f4f7f6; --card-bg: #ffffff; --text-main: #2d3748;
                 --text-muted: #718096; --primary: #4299e1; --primary-hover: #3182ce;
-                --action: #ed8936; --action-hover: #dd6b20;
+                --action: #ed8936; --action-hover: #dd6b20; --danger-bg: #fed7d7; --danger-text: #c53030;
             }
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: var(--bg-color); display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
             .dashboard { background: var(--card-bg); padding: 30px; border-radius: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.06); width: 100%; max-width: 380px; }
@@ -94,12 +115,13 @@ def index():
             .header p { margin: 5px 0 0; font-size: 13px; color: var(--text-muted); }
             .grid-container { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 25px; }
             .data-card { background: #f8fafc; border-radius: 16px; padding: 20px 10px; text-align: center; border: 1px solid #e2e8f0; }
+            .data-card.full-width { grid-column: 1 / -1; padding: 15px 10px; } /* 满宽卡片 */
             .data-label { font-size: 13px; color: var(--text-muted); margin-bottom: 10px; font-weight: 500; }
             .data-value { font-size: 32px; font-weight: 700; color: var(--text-main); }
             .data-unit { font-size: 16px; color: var(--text-muted); font-weight: normal; margin-left: 2px; }
             .status-indicator { display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 15px; font-weight: 600; height: 38px; }
             .status-dot { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 8px currentColor; }
-            .error-banner { background: #fed7d7; color: #c53030; padding: 12px; border-radius: 12px; text-align: center; font-size: 14px; margin-bottom: 20px; font-weight: 500; }
+            .error-banner { background: var(--danger-bg); color: var(--danger-text); padding: 12px; border-radius: 12px; text-align: center; font-size: 14px; margin-bottom: 20px; font-weight: 600; box-shadow: 0 2px 10px rgba(229, 62, 62, 0.1); }
             .controls { display: flex; flex-direction: column; gap: 12px; }
             button { width: 100%; padding: 16px; border: none; border-radius: 14px; font-size: 16px; font-weight: 600; color: white; cursor: pointer; transition: all 0.2s; }
             button:disabled { opacity: 0.6; cursor: not-allowed; }
@@ -116,22 +138,34 @@ def index():
                 <h2>智能设备管理</h2>
                 <p>实时监控与远程控制</p>
             </div>
-            {% if error %} <div class="error-banner">{{ error }}</div> {% endif %}
+
+            {% if api_error %} <div class="error-banner">网络错误: {{ api_error }}</div> {% endif %}
+            {% if hw_error %} <div class="error-banner">⚠️ 硬件故障码: {{ hw_error }}</div> {% endif %}
+
             <div class="grid-container">
                 <div class="data-card">
                     <div class="data-label">环境温度</div>
                     <div class="data-value">{{ temp }}<span class="data-unit">°C</span></div>
                 </div>
                 <div class="data-card">
-                    <div class="data-label">设备状态</div>
+                    <div class="data-label">设备运行状态</div>
                     <div class="status-indicator" style="color: {{ sys_state_color }};">
                         <span class="status-dot" style="background-color: {{ sys_state_color }};"></span>
                         {{ sys_state_text }}
                     </div>
                 </div>
+
+                <div class="data-card full-width">
+                    <div class="data-label">内部活体感应</div>
+                    <div class="status-indicator" style="color: {{ cat_color }};">
+                        <span class="status-dot" style="background-color: {{ cat_color }};"></span>
+                        {{ cat_text }}
+                    </div>
+                </div>
             </div>
+
             <div class="controls">
-                <button id="cleanBtn" class="btn-action" onclick="sendCleanCommand()">🚀 一键铲屎</button>
+                <button id="cleanBtn" class="btn-action" onclick="sendCleanCommand()">🚀 远程一键铲屎</button>
                 <button class="btn-refresh" onclick="location.reload()">🔄 刷新最新状态</button>
             </div>
             <div id="status-msg"></div>
@@ -163,7 +197,7 @@ def index():
                 })
                 .finally(() => {
                     btn.disabled = false;
-                    btn.innerText = "🚀 一键铲屎";
+                    btn.innerText = "🚀 远程一键铲屎";
                     setTimeout(() => { msgBox.innerText = ""; }, 3500);
                 });
             }
@@ -171,16 +205,18 @@ def index():
     </body>
     </html>
     """
-    
-    return render_template_string(html_template, 
-                                  temp=temp_value, 
+
+    return render_template_string(html_template,
+                                  temp=temp_value,
                                   sys_state_text=sys_state_text,
                                   sys_state_color=sys_state_color,
-                                  error=error_msg)
+                                  cat_text=cat_text,
+                                  cat_color=cat_color,
+                                  api_error=api_error,
+                                  hw_error=hw_error)
 
 @app.route('/clean', methods=['POST'])
 def send_clean_cmd():
-    # 保持不变
     url = "https://iot-api.heclouds.com/thingmodel/set-device-property"
     headers = {
         "authorization": AUTHORIZATION,
